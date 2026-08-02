@@ -4,6 +4,9 @@ windows utility that watches a specific USB microphone (`VID_08BB` / `PID_2902`)
 
 the mic physically disconnects when its mute button is toggled off, so this watches USB presence instead of HID input.
 
+<img width="422" height="267" alt="image" src="https://github.com/user-attachments/assets/ff495b1d-e92b-41f4-a272-8b451967cbbe" />
+
+
 ---
 
 ### modes
