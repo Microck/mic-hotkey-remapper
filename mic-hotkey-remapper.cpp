@@ -27,7 +27,12 @@ constexpr wchar_t kConfigClass[] = L"MicHotkeyRemapper.Config";
 constexpr wchar_t kMutexName[] = L"Local\\MicHotkeyRemapper.08BB.2902";
 constexpr wchar_t kTargetToken[] = L"vid_08bb&pid_2902";
 constexpr UINT kReloadMessage = WM_APP + 1;
-constexpr UINT kControlMessage = WM_APP + 2;
+constexpr UINT kTrayMessage = WM_APP + 2;
+constexpr UINT kTrayToggle = 2001;
+constexpr UINT kTrayConfigure = 2002;
+constexpr UINT kTrayExit = 2003;
+
+UINT g_taskbarCreated = 0;
 
 enum class Mode { Hold, Tap };
 
@@ -47,8 +52,11 @@ struct AppState {
     bool devicePresent = false;
     bool initialized = false;
     bool keyHeld = false;
+    bool remappingEnabled = true;
     ULONGLONG lastTransition = 0;
     HWND window = nullptr;
+    HICON enabledIcon = nullptr;
+    HICON disabledIcon = nullptr;
 };
 
 struct ConfigUi {
@@ -349,6 +357,137 @@ void TapCombo(const KeyCombo& combo) {
     ReleaseCombo(combo);
 }
 
+void DrawMicrophoneShape(HDC dc, int size, COLORREF color) {
+    int stroke = max(1, size / 7);
+    HPEN pen = CreatePen(PS_SOLID, stroke, color);
+    HBRUSH brush = CreateSolidBrush(color);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+
+    int left = size * 3 / 8;
+    int right = size * 5 / 8;
+    int top = size / 8;
+    int bottom = size * 5 / 8;
+    RoundRect(dc, left, top, right, bottom, size / 5, size / 5);
+
+    SelectObject(dc, GetStockObject(NULL_BRUSH));
+    MoveToEx(dc, size / 4, size * 7 / 16, nullptr);
+    LineTo(dc, size / 4, size * 5 / 8);
+    LineTo(dc, size * 3 / 8, size * 3 / 4);
+    LineTo(dc, size * 5 / 8, size * 3 / 4);
+    LineTo(dc, size * 3 / 4, size * 5 / 8);
+    LineTo(dc, size * 3 / 4, size * 7 / 16);
+
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+}
+
+HICON CreateMicrophoneIcon(COLORREF color) {
+    int size = max(16, GetSystemMetrics(SM_CXSMICON));
+    HDC screen = GetDC(nullptr);
+    HDC colorDc = CreateCompatibleDC(screen);
+    HBITMAP colorBitmap = CreateCompatibleBitmap(screen, size, size);
+    HBITMAP maskBitmap = CreateBitmap(size, size, 1, 1, nullptr);
+    HGDIOBJ oldColorBitmap = SelectObject(colorDc, colorBitmap);
+    HGDIOBJ oldMaskBitmap = SelectObject(colorDc, maskBitmap);
+
+    PatBlt(colorDc, 0, 0, size, size, WHITENESS);
+    SelectObject(colorDc, colorBitmap);
+    PatBlt(colorDc, 0, 0, size, size, BLACKNESS);
+    DrawMicrophoneShape(colorDc, size, color);
+
+    SelectObject(colorDc, maskBitmap);
+    PatBlt(colorDc, 0, 0, size, size, WHITENESS);
+    DrawMicrophoneShape(colorDc, size, RGB(0, 0, 0));
+
+    ICONINFO iconInfo = {};
+    iconInfo.fIcon = TRUE;
+    iconInfo.hbmColor = colorBitmap;
+    iconInfo.hbmMask = maskBitmap;
+    HICON icon = CreateIconIndirect(&iconInfo);
+
+    SelectObject(colorDc, oldMaskBitmap);
+    SelectObject(colorDc, oldColorBitmap);
+    DeleteObject(maskBitmap);
+    DeleteObject(colorBitmap);
+    DeleteDC(colorDc);
+    ReleaseDC(nullptr, screen);
+    return icon;
+}
+
+void UpdateTrayIcon(AppState* state) {
+    if (state->window == nullptr) return;
+    NOTIFYICONDATAW notification = {};
+    notification.cbSize = sizeof(notification);
+    notification.hWnd = state->window;
+    notification.uID = 1;
+    notification.uFlags = NIF_ICON | NIF_TIP;
+    notification.hIcon = state->remappingEnabled ? state->enabledIcon : state->disabledIcon;
+    wcscpy_s(notification.szTip, state->remappingEnabled ? L"Mic remapper: enabled" : L"Mic remapper: disabled");
+    if (!Shell_NotifyIconW(NIM_MODIFY, &notification)) Shell_NotifyIconW(NIM_ADD, &notification);
+}
+
+void AddTrayIcon(AppState* state) {
+    if (state->enabledIcon == nullptr) state->enabledIcon = CreateMicrophoneIcon(RGB(40, 190, 80));
+    if (state->disabledIcon == nullptr) state->disabledIcon = CreateMicrophoneIcon(RGB(210, 55, 55));
+
+    NOTIFYICONDATAW notification = {};
+    notification.cbSize = sizeof(notification);
+    notification.hWnd = state->window;
+    notification.uID = 1;
+    notification.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    notification.uCallbackMessage = kTrayMessage;
+    notification.hIcon = state->remappingEnabled ? state->enabledIcon : state->disabledIcon;
+    wcscpy_s(notification.szTip, state->remappingEnabled ? L"Mic remapper: enabled" : L"Mic remapper: disabled");
+    Shell_NotifyIconW(NIM_ADD, &notification);
+}
+
+void RemoveTrayIcon(AppState* state) {
+    if (state->window != nullptr) {
+        NOTIFYICONDATAW notification = {};
+        notification.cbSize = sizeof(notification);
+        notification.hWnd = state->window;
+        notification.uID = 1;
+        Shell_NotifyIconW(NIM_DELETE, &notification);
+    }
+    if (state->enabledIcon != nullptr) DestroyIcon(state->enabledIcon);
+    if (state->disabledIcon != nullptr) DestroyIcon(state->disabledIcon);
+    state->enabledIcon = nullptr;
+    state->disabledIcon = nullptr;
+}
+
+void SetRemappingEnabled(AppState* state, bool enabled) {
+    if (state->remappingEnabled == enabled) return;
+    if (!enabled && state->keyHeld) {
+        ReleaseCombo(state->config.combo);
+        state->keyHeld = false;
+    }
+    state->remappingEnabled = enabled;
+    if (enabled && state->devicePresent && state->config.mode == Mode::Hold) {
+        PressCombo(state->config.combo);
+        state->keyHeld = true;
+    }
+    UpdateTrayIcon(state);
+}
+
+void ShowTrayMenu(AppState* state) {
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) return;
+    AppendMenuW(menu, MF_STRING, kTrayToggle, state->remappingEnabled ? L"Disable remapping" : L"Enable remapping");
+    AppendMenuW(menu, MF_STRING, kTrayConfigure, L"Configure...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kTrayExit, L"Exit");
+
+    POINT cursor = {};
+    GetCursorPos(&cursor);
+    SetForegroundWindow(state->window);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, state->window, nullptr);
+    PostMessageW(state->window, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+}
+
 void ApplyPresence(AppState* state, bool present, bool initial) {
     ULONGLONG now = GetTickCount64();
     if (!initial && now - state->lastTransition < 250) return;
@@ -362,6 +501,8 @@ void ApplyPresence(AppState* state, bool present, bool initial) {
     state->devicePresent = present;
     state->initialized = true;
     state->lastTransition = now;
+
+    if (!state->remappingEnabled) return;
 
     if (state->config.mode == Mode::Hold) {
         if (present) {
@@ -381,7 +522,7 @@ void ReloadConfig(AppState* state) {
         state->keyHeld = false;
     }
     state->config = updated;
-    if (state->devicePresent && state->config.mode == Mode::Hold) {
+    if (state->remappingEnabled && state->devicePresent && state->config.mode == Mode::Hold) {
         PressCombo(state->config.combo);
         state->keyHeld = true;
     }
@@ -394,6 +535,8 @@ void ReleaseHeldKey(AppState* state) {
     }
 }
 
+void LaunchConfigurator();
+
 LRESULT CALLBACK BackgroundWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     auto state = reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
@@ -404,9 +547,36 @@ LRESULT CALLBACK BackgroundWindowProc(HWND window, UINT message, WPARAM wParam, 
     }
 
     if (state != nullptr) {
+        if (g_taskbarCreated != 0 && message == g_taskbarCreated) {
+            AddTrayIcon(state);
+            return 0;
+        }
         if (message == kReloadMessage) {
             ReloadConfig(state);
             return 0;
+        }
+        if (message == kTrayMessage) {
+            if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
+                ShowTrayMenu(state);
+            } else if (lParam == WM_LBUTTONDBLCLK) {
+                LaunchConfigurator();
+            }
+            return 0;
+        }
+        if (message == WM_COMMAND) {
+            switch (LOWORD(wParam)) {
+            case kTrayToggle:
+                SetRemappingEnabled(state, !state->remappingEnabled);
+                return 0;
+            case kTrayConfigure:
+                LaunchConfigurator();
+                return 0;
+            case kTrayExit:
+                PostMessageW(window, WM_CLOSE, 0, 0);
+                return 0;
+            default:
+                break;
+            }
         }
         if (message == WM_DEVICECHANGE && (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE) && lParam != 0) {
             auto header = reinterpret_cast<PDEV_BROADCAST_HDR>(lParam);
@@ -464,6 +634,8 @@ int RunBackground(HINSTANCE instance) {
     filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
     filter.dbcc_classguid = GUID_DEVINTERFACE_USB_DEVICE;
     HDEVNOTIFY notification = RegisterDeviceNotificationW(window, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
+    g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+    AddTrayIcon(&state);
     ApplyPresence(&state, IsTargetDevicePresent(), true);
 
     MSG message = {};
@@ -473,6 +645,7 @@ int RunBackground(HINSTANCE instance) {
     }
 
     if (notification != nullptr) UnregisterDeviceNotification(notification);
+    RemoveTrayIcon(&state);
     ReleaseHeldKey(&state);
     CloseHandle(mutex);
     return 0;
@@ -516,6 +689,18 @@ LRESULT CALLBACK ComboEditProc(HWND window, UINT message, WPARAM wParam, LPARAM 
 
 void LaunchBackground() {
     std::wstring command = L"\"" + ExecutablePath() + L"\" --background";
+    std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+    mutableCommand.push_back(L'\0');
+    STARTUPINFOW startup = {sizeof(startup)};
+    PROCESS_INFORMATION process = {};
+    if (CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+}
+
+void LaunchConfigurator() {
+    std::wstring command = L"\"" + ExecutablePath() + L"\"";
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
     STARTUPINFOW startup = {sizeof(startup)};

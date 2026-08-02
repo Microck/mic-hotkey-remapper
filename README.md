@@ -19,6 +19,8 @@ run the exe. a config window opens on first launch. pick a mode, click the short
 
 config is stored at `%APPDATA%\MicHotkeyRemapper\config.ini`. enable `Start with Windows` to run at logon. no admin privileges required.
 
+when running, the app places a microphone icon in the notification area. green means remapping is enabled; red means it is disabled. right-click the icon to enable or disable remapping, open configuration, or exit. disabling remapping is session-only and releases a held shortcut immediately.
+
 ---
 
 ### build
