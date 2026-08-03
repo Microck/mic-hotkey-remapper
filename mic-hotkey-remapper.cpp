@@ -31,6 +31,7 @@ constexpr UINT kTrayMessage = WM_APP + 2;
 constexpr UINT kTrayToggle = 2001;
 constexpr UINT kTrayConfigure = 2002;
 constexpr UINT kTrayExit = 2003;
+constexpr UINT kTrayAudioCleaner = 2004;
 
 UINT g_taskbarCreated = 0;
 
@@ -477,6 +478,7 @@ void ShowTrayMenu(AppState* state) {
     if (menu == nullptr) return;
     AppendMenuW(menu, MF_STRING, kTrayToggle, state->remappingEnabled ? L"Disable remapping" : L"Enable remapping");
     AppendMenuW(menu, MF_STRING, kTrayConfigure, L"Configure...");
+    AppendMenuW(menu, MF_STRING, kTrayAudioCleaner, L"Audio cleaner...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kTrayExit, L"Exit");
 
@@ -536,6 +538,7 @@ void ReleaseHeldKey(AppState* state) {
 }
 
 void LaunchConfigurator();
+void LaunchAudioCleaner();
 
 LRESULT CALLBACK BackgroundWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     auto state = reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -570,6 +573,9 @@ LRESULT CALLBACK BackgroundWindowProc(HWND window, UINT message, WPARAM wParam, 
                 return 0;
             case kTrayConfigure:
                 LaunchConfigurator();
+                return 0;
+            case kTrayAudioCleaner:
+                LaunchAudioCleaner();
                 return 0;
             case kTrayExit:
                 PostMessageW(window, WM_CLOSE, 0, 0);
@@ -708,6 +714,25 @@ void LaunchConfigurator() {
     if (CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
+    }
+}
+
+void LaunchAudioCleaner() {
+    std::wstring executable = ExecutablePath();
+    size_t separator = executable.find_last_of(L"\\/");
+    std::wstring cleaner = separator == std::wstring::npos
+        ? L"mic-audio-cleaner.exe"
+        : executable.substr(0, separator + 1) + L"mic-audio-cleaner.exe";
+    std::wstring command = L"\"" + cleaner + L"\"";
+    std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+    mutableCommand.push_back(L'\0');
+    STARTUPINFOW startup = {sizeof(startup)};
+    PROCESS_INFORMATION process = {};
+    if (CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    } else {
+        MessageBoxW(nullptr, L"mic-audio-cleaner.exe was not found beside the remapper.", L"Audio cleaner unavailable", MB_OK | MB_ICONWARNING);
     }
 }
 
