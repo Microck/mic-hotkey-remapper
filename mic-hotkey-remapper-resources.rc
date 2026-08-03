@@ -1,0 +1,3 @@
+#include "mic-hotkey-remapper-resource.h"
+
+IDR_MIC_AUDIO_APO RCDATA "release-build\\mic-audio-apo.dll"

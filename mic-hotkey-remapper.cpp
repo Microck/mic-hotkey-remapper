@@ -6,6 +6,7 @@
 #include <setupapi.h>
 #include <initguid.h>
 #include <usbiodef.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cwctype>
@@ -14,11 +15,17 @@
 #include <string>
 #include <vector>
 
+#include "mic-hotkey-remapper-resource.h"
+
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "Gdi32.lib")
 #pragma comment(lib, "Setupapi.lib")
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "User32.lib")
+
+int RunAudioCleanerGui(HINSTANCE instance);
+int RunAudioApoCommandLine(HINSTANCE instance);
+void SetEmbeddedApoDllPath(const wchar_t* path);
 
 namespace {
 
@@ -32,6 +39,7 @@ constexpr UINT kTrayToggle = 2001;
 constexpr UINT kTrayConfigure = 2002;
 constexpr UINT kTrayExit = 2003;
 constexpr UINT kTrayAudioCleaner = 2004;
+constexpr UINT kTrayAudioApo = 2005;
 
 UINT g_taskbarCreated = 0;
 
@@ -478,7 +486,8 @@ void ShowTrayMenu(AppState* state) {
     if (menu == nullptr) return;
     AppendMenuW(menu, MF_STRING, kTrayToggle, state->remappingEnabled ? L"Disable remapping" : L"Enable remapping");
     AppendMenuW(menu, MF_STRING, kTrayConfigure, L"Configure...");
-    AppendMenuW(menu, MF_STRING, kTrayAudioCleaner, L"Audio cleaner...");
+    AppendMenuW(menu, MF_STRING, kTrayAudioCleaner, L"Audio cleaner (virtual cable)...");
+    AppendMenuW(menu, MF_STRING, kTrayAudioApo, L"Audio cleaner (direct device)...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kTrayExit, L"Exit");
 
@@ -539,6 +548,7 @@ void ReleaseHeldKey(AppState* state) {
 
 void LaunchConfigurator();
 void LaunchAudioCleaner();
+void LaunchDirectAudioCleaner();
 
 LRESULT CALLBACK BackgroundWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     auto state = reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -576,6 +586,9 @@ LRESULT CALLBACK BackgroundWindowProc(HWND window, UINT message, WPARAM wParam, 
                 return 0;
             case kTrayAudioCleaner:
                 LaunchAudioCleaner();
+                return 0;
+            case kTrayAudioApo:
+                LaunchDirectAudioCleaner();
                 return 0;
             case kTrayExit:
                 PostMessageW(window, WM_CLOSE, 0, 0);
@@ -717,13 +730,12 @@ void LaunchConfigurator() {
     }
 }
 
-void LaunchAudioCleaner() {
-    std::wstring executable = ExecutablePath();
-    size_t separator = executable.find_last_of(L"\\/");
-    std::wstring cleaner = separator == std::wstring::npos
-        ? L"mic-audio-cleaner.exe"
-        : executable.substr(0, separator + 1) + L"mic-audio-cleaner.exe";
-    std::wstring command = L"\"" + cleaner + L"\"";
+bool LaunchSelf(const wchar_t* arguments) {
+    std::wstring command = L"\"" + ExecutablePath() + L"\"";
+    if (arguments != nullptr && arguments[0] != L'\0') {
+        command += L" ";
+        command += arguments;
+    }
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
     STARTUPINFOW startup = {sizeof(startup)};
@@ -731,9 +743,67 @@ void LaunchAudioCleaner() {
     if (CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
+        return true;
     } else {
-        MessageBoxW(nullptr, L"mic-audio-cleaner.exe was not found beside the remapper.", L"Audio cleaner unavailable", MB_OK | MB_ICONWARNING);
+        return false;
     }
+}
+
+bool ExtractEmbeddedApo(std::wstring* path) {
+    if (path == nullptr) return false;
+    HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_MIC_AUDIO_APO), RT_RCDATA);
+    if (resource == nullptr) return false;
+    HGLOBAL loaded = LoadResource(nullptr, resource);
+    const DWORD size = SizeofResource(nullptr, resource);
+    const void* bytes = loaded == nullptr ? nullptr : LockResource(loaded);
+    if (bytes == nullptr || size == 0) return false;
+
+    wchar_t commonData[MAX_PATH] = {};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, SHGFP_TYPE_CURRENT, commonData))) {
+        return false;
+    }
+    const std::wstring directory = std::wstring(commonData) + L"\\MicHotkeyRemapper";
+    CreateDirectoryW(directory.c_str(), nullptr);
+    const std::wstring target = directory + L"\\mic-audio-apo.dll";
+
+    WIN32_FILE_ATTRIBUTE_DATA existing = {};
+    if (GetFileAttributesExW(target.c_str(), GetFileExInfoStandard, &existing)) {
+        ULARGE_INTEGER existingSize = {};
+        existingSize.HighPart = existing.nFileSizeHigh;
+        existingSize.LowPart = existing.nFileSizeLow;
+        if (existingSize.QuadPart == size) {
+            *path = target;
+            return true;
+        }
+    }
+
+    const std::wstring temporary = target + L".new";
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool complete = WriteFile(file, bytes, size, &written, nullptr) && written == size;
+    if (complete) FlushFileBuffers(file);
+    CloseHandle(file);
+    if (!complete || !MoveFileExW(temporary.c_str(), target.c_str(),
+                                  MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    *path = target;
+    return true;
+}
+
+void LaunchAudioCleaner() {
+    if (LaunchSelf(L"--audio-cleaner")) return;
+    MessageBoxW(nullptr, L"The audio cleaner could not be started.",
+                L"Audio cleaner unavailable", MB_OK | MB_ICONWARNING);
+}
+
+void LaunchDirectAudioCleaner() {
+    if (LaunchSelf(L"--audio-direct")) return;
+    MessageBoxW(nullptr, L"The direct audio cleaner could not be started.",
+                L"Direct audio cleaner unavailable", MB_OK | MB_ICONWARNING);
 }
 
 void ReloadBackground() {
@@ -867,5 +937,30 @@ int RunConfigurator(HINSTANCE instance) {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     std::wstring command = commandLine == nullptr ? L"" : Lower(commandLine);
     if (command.find(L"--background") != std::wstring::npos) return RunBackground(instance);
+    if (command.find(L"--audio-cleaner") != std::wstring::npos) {
+        HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(result)) return 1;
+        const int exitCode = RunAudioCleanerGui(instance);
+        CoUninitialize();
+        return exitCode;
+    }
+    if (command.find(L"--audio-direct") != std::wstring::npos) {
+        HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(result)) return 1;
+        if (command.find(L"/install") != std::wstring::npos ||
+            command.find(L"/uninstall") != std::wstring::npos) {
+            std::wstring apoPath;
+            if (!ExtractEmbeddedApo(&apoPath)) {
+                MessageBoxW(nullptr, L"The embedded direct-device audio cleaner could not be prepared.",
+                            L"Direct audio cleaner unavailable", MB_OK | MB_ICONERROR);
+                CoUninitialize();
+                return 1;
+            }
+            SetEmbeddedApoDllPath(apoPath.c_str());
+        }
+        const int exitCode = RunAudioApoCommandLine(instance);
+        CoUninitialize();
+        return exitCode;
+    }
     return RunConfigurator(instance);
 }

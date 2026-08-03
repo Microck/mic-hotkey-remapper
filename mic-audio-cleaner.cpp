@@ -854,10 +854,16 @@ int RunGui(HINSTANCE instance) {
 
 } // namespace
 
+#ifndef MIC_HOTKEY_REMAPPER_EMBEDDED
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(result)) return 1;
     int exitCode = RunGui(instance);
     CoUninitialize();
     return exitCode;
+}
+#endif
+
+int RunAudioCleanerGui(HINSTANCE instance) {
+    return RunGui(instance);
 }
