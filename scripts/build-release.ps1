@@ -1,6 +1,11 @@
 [CmdletBinding()]
 param(
     [string]$Version = "1.4.1",
+    [ValidateSet("x64", "arm64")]
+    [string]$Architecture = "x64",
+    [string]$BuildRootPath = "",
+    [string]$PackageRootPath = "",
+    [switch]$NoArchive,
     [switch]$Clean
 )
 
@@ -10,9 +15,17 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $sourceRoot = Join-Path $repoRoot "src"
 $resourceRoot = Join-Path $repoRoot "resources"
-$buildRoot = Join-Path $repoRoot "build\release"
+$buildRoot = if ([string]::IsNullOrWhiteSpace($BuildRootPath)) {
+    Join-Path $repoRoot "build\release"
+} else {
+    $BuildRootPath
+}
 $distRoot = Join-Path $repoRoot "dist"
-$packageRoot = Join-Path $distRoot "mic-hotkey-remapper-v$Version"
+$packageRoot = if ([string]::IsNullOrWhiteSpace($PackageRootPath)) {
+    Join-Path $distRoot "mic-hotkey-remapper-v$Version"
+} else {
+    $PackageRootPath
+}
 $zipPath = Join-Path $distRoot "mic-hotkey-remapper-v$Version.zip"
 $checksumPath = "$zipPath.sha256"
 
@@ -103,16 +116,20 @@ try {
 Copy-Item -LiteralPath (Join-Path $buildRoot "mic-hotkey-remapper.exe") -Destination (Join-Path $packageRoot "mic-hotkey-remapper.exe")
 Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination (Join-Path $packageRoot "README.md")
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $packageRoot "LICENSE")
-Compress-Archive -Path $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal
+if (-not $NoArchive) {
+    Compress-Archive -Path $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal
 
-$sha256 = [System.Security.Cryptography.SHA256]::Create()
-try {
-    $hashBytes = $sha256.ComputeHash([System.IO.File]::ReadAllBytes($zipPath))
-    $hash = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "").ToLowerInvariant()
-} finally {
-    $sha256.Dispose()
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash([System.IO.File]::ReadAllBytes($zipPath))
+        $hash = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+    Set-Content -LiteralPath $checksumPath -Value "$hash  $(Split-Path -Leaf $zipPath)" -Encoding ascii
+
+    Write-Host "Release package: $zipPath"
+    Write-Host "SHA256: $hash"
+} else {
+    Write-Host "Build output ($Architecture): $packageRoot"
 }
-Set-Content -LiteralPath $checksumPath -Value "$hash  $(Split-Path -Leaf $zipPath)" -Encoding ascii
-
-Write-Host "Release package: $zipPath"
-Write-Host "SHA256: $hash"

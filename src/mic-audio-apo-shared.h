@@ -17,3 +17,4 @@ constexpr wchar_t kMicAudioApoPreviousValue[] = L"PreviousFxValue";
 constexpr wchar_t kMicAudioApoPreviousExists[] = L"PreviousFxValueExists";
 constexpr wchar_t kMicAudioApoHighPassHz[] = L"HighPassHz";
 constexpr wchar_t kMicAudioApoGateThresholdCent[] = L"GateThresholdCent";
+constexpr wchar_t kMicAudioApoNoiseReductionPercent[] = L"NoiseReductionPercent";

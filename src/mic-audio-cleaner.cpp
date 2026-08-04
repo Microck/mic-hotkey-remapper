@@ -687,6 +687,21 @@ int FindEndpointIndex(const std::vector<Endpoint>& endpoints, const std::wstring
     return endpoints.empty() ? -1 : 0;
 }
 
+bool IsLikelyVirtualOutput(const std::wstring& name) {
+    std::wstring lowered = name;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), towlower);
+    for (const wchar_t* token : {L"cable", L"virtual", L"voicemeeter", L"vb-audio", L"blackhole"}) {
+        if (lowered.find(token) != std::wstring::npos) return true;
+    }
+    return false;
+}
+
+bool HasVirtualOutput(const std::vector<Endpoint>& endpoints) {
+    return std::any_of(endpoints.begin(), endpoints.end(), [](const Endpoint& endpoint) {
+        return IsLikelyVirtualOutput(endpoint.name);
+    });
+}
+
 void PopulateCombo(HWND combo, const std::vector<Endpoint>& endpoints, int selectedIndex) {
     SendMessageW(combo, CB_RESETCONTENT, 0, 0);
     for (size_t index = 0; index < endpoints.size(); ++index) {
@@ -705,7 +720,12 @@ void RefreshDevices(ConfigUi* ui) {
     PopulateCombo(ui->outputCombo, ui->outputs, outputIndex);
     if (ui->inputs.empty()) SetStatus(ui, L"No active microphone found. Turn the mic on, then refresh.");
     else if (ui->outputs.empty()) SetStatus(ui, L"No active output endpoint found.");
-    else SetStatus(ui, L"Select the cleaned output in your STT app.");
+    else if (!HasVirtualOutput(ui->outputs)) {
+        SetStatus(ui, L"No virtual-cable playback endpoint found. Install a virtual cable, then refresh."
+                       L" This EXE cannot create a new microphone input by itself.");
+    } else {
+        SetStatus(ui, L"Select the cable's recording endpoint as the STT input after starting.");
+    }
 }
 
 bool ReadSelectedEndpoint(HWND combo, const std::vector<Endpoint>& endpoints, std::wstring* id) {
@@ -728,6 +748,12 @@ void TogglePipeline(ConfigUi* ui) {
     if (!ReadSelectedEndpoint(ui->inputCombo, ui->inputs, &settings.inputId) ||
         !ReadSelectedEndpoint(ui->outputCombo, ui->outputs, &settings.outputId)) {
         SetStatus(ui, L"Choose both an input and an output device first.");
+        return;
+    }
+    const LRESULT selectedOutput = SendMessageW(ui->outputCombo, CB_GETCURSEL, 0, 0);
+    if (selectedOutput == CB_ERR || !IsLikelyVirtualOutput(ui->outputs[static_cast<size_t>(selectedOutput)].name)) {
+        SetStatus(ui, L"The selected destination is normal playback, not a virtual microphone."
+                       L" Install a virtual cable and select its playback endpoint.");
         return;
     }
     if (!ReadFloatEdit(ui->highPassEdit, 40.0f, 300.0f, &settings.highPassHz) ||
@@ -763,18 +789,18 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window, GWLP_HINSTANCE));
         HWND inputLabel = CreateWindowW(L"STATIC", L"Microphone input:", WS_CHILD | WS_VISIBLE, 16, 18, 150, 24, window, nullptr, instance, nullptr);
         ui->inputCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 170, 14, 390, 250, window, reinterpret_cast<HMENU>(kInputCombo), instance, nullptr);
-        HWND outputLabel = CreateWindowW(L"STATIC", L"Cleaned output:", WS_CHILD | WS_VISIBLE, 16, 62, 150, 24, window, nullptr, instance, nullptr);
-        ui->outputCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 170, 58, 390, 250, window, reinterpret_cast<HMENU>(kOutputCombo), instance, nullptr);
+        HWND outputLabel = CreateWindowW(L"STATIC", L"Cable playback destination:", WS_CHILD | WS_VISIBLE, 16, 62, 180, 24, window, nullptr, instance, nullptr);
+        ui->outputCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 200, 58, 360, 250, window, reinterpret_cast<HMENU>(kOutputCombo), instance, nullptr);
         HWND highPassLabel = CreateWindowW(L"STATIC", L"High-pass (Hz):", WS_CHILD | WS_VISIBLE, 16, 106, 150, 24, window, nullptr, instance, nullptr);
         ui->highPassEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"90", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER, 170, 102, 90, 26, window, reinterpret_cast<HMENU>(kHighPassEdit), instance, nullptr);
         HWND reductionLabel = CreateWindowW(L"STATIC", L"Noise reduction (%):", WS_CHILD | WS_VISIBLE, 280, 106, 160, 24, window, nullptr, instance, nullptr);
         ui->noiseReductionEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"82", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER, 445, 102, 90, 26, window, reinterpret_cast<HMENU>(kNoiseReductionEdit), instance, nullptr);
         HWND gateLabel = CreateWindowW(L"STATIC", L"Gate threshold (x noise):", WS_CHILD | WS_VISIBLE, 16, 144, 190, 24, window, nullptr, instance, nullptr);
         ui->gateThresholdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"2.50", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 210, 140, 90, 26, window, reinterpret_cast<HMENU>(kGateThresholdEdit), instance, nullptr);
-        HWND hint = CreateWindowW(L"STATIC", L"Start with the mic silent for about one second so the cleaner can learn its noise floor.", WS_CHILD | WS_VISIBLE, 16, 184, 560, 24, window, nullptr, instance, nullptr);
-        HWND refresh = CreateWindowW(L"BUTTON", L"Refresh devices", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 16, 226, 130, 30, window, reinterpret_cast<HMENU>(kRefreshButton), instance, nullptr);
-        ui->startButton = CreateWindowW(L"BUTTON", L"Start cleaner", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 170, 226, 140, 30, window, reinterpret_cast<HMENU>(kStartButton), instance, nullptr);
-        ui->statusLabel = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 274, 560, 42, window, reinterpret_cast<HMENU>(kStatusLabel), instance, nullptr);
+        HWND hint = CreateWindowW(L"STATIC", L"The destination must be a virtual cable playback endpoint. STT selects the matching cable recording endpoint as its input.", WS_CHILD | WS_VISIBLE, 16, 184, 560, 36, window, nullptr, instance, nullptr);
+        HWND refresh = CreateWindowW(L"BUTTON", L"Refresh devices", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 16, 236, 130, 30, window, reinterpret_cast<HMENU>(kRefreshButton), instance, nullptr);
+        ui->startButton = CreateWindowW(L"BUTTON", L"Start cleaner", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 170, 236, 140, 30, window, reinterpret_cast<HMENU>(kStartButton), instance, nullptr);
+        ui->statusLabel = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 284, 560, 42, window, reinterpret_cast<HMENU>(kStatusLabel), instance, nullptr);
         SetControlFont(inputLabel);
         SetControlFont(outputLabel);
         SetControlFont(highPassLabel);
@@ -839,7 +865,7 @@ int RunGui(HINSTANCE instance) {
     ConfigUi ui;
     HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClass, L"Microphone Audio Cleaner",
                                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                 CW_USEDEFAULT, CW_USEDEFAULT, 620, 370, nullptr, nullptr, instance, &ui);
+                                 CW_USEDEFAULT, CW_USEDEFAULT, 620, 390, nullptr, nullptr, instance, &ui);
     if (window == nullptr) return 1;
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);

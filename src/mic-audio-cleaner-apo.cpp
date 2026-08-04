@@ -36,11 +36,13 @@ constexpr wchar_t kTargetName[] = L"USB PnP Sound Device";
 constexpr wchar_t kCurrentApoClsid[] = L"{A1D5E6F4-4E58-4D67-A42A-5114A9B4E177}";
 constexpr UINT kDefaultHighPassHz = 90;
 constexpr UINT kDefaultGateThresholdCent = 250;
+constexpr UINT kDefaultNoiseReductionPercent = 82;
 constexpr int kInstallButton = 1001;
 constexpr int kUninstallButton = 1002;
 constexpr int kHighPassEdit = 1003;
 constexpr int kGateEdit = 1004;
-constexpr int kStatusText = 1005;
+constexpr int kNoiseReductionEdit = 1005;
+constexpr int kStatusText = 1006;
 
 std::wstring g_embeddedApoDllPath;
 
@@ -319,6 +321,14 @@ HRESULT CallDllRegistration(const char* exportName) {
 }
 
 HRESULT RegisterApoWithAudioEngine() {
+    // RegisterAPO does not replace an existing registration for the same CLSID.
+    // Remove the previous interface list first so upgrades cannot leave the old
+    // private interface GUID installed.
+    const HRESULT unregisterResult = UnregisterAPO(CLSID_MicAudioCleanerApo);
+    if (FAILED(unregisterResult) && unregisterResult != HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
+        return unregisterResult;
+    }
+
     APO_REG_PROPERTIES properties = {};
     properties.clsid = CLSID_MicAudioCleanerApo;
     properties.Flags = APO_FLAG_DEFAULT;
@@ -333,7 +343,7 @@ HRESULT RegisterApoWithAudioEngine() {
     properties.u32MaxOutputConnections = 1;
     properties.u32MaxInstances = ULONG_MAX;
     properties.u32NumAPOInterfaces = 1;
-    properties.iidAPOInterfaceList[0] = IID_IMicAudioCleanerApo;
+    properties.iidAPOInterfaceList[0] = __uuidof(IAudioProcessingObject);
     return RegisterAPO(&properties);
 }
 
@@ -354,7 +364,7 @@ void RestoreEndpointProperty() {
     }
 }
 
-bool InstallApo(UINT highPassHz, UINT gateThresholdCent, std::wstring* error) {
+bool InstallApo(UINT highPassHz, UINT gateThresholdCent, UINT noiseReductionPercent, std::wstring* error) {
     TargetEndpoint target;
     if (!FindTargetEndpoint(&target)) {
         *error = L"The active Microphone (USB PnP Sound Device) endpoint was not found. Toggle the mic on and retry.";
@@ -403,7 +413,11 @@ bool InstallApo(UINT highPassHz, UINT gateThresholdCent, std::wstring* error) {
     const LSTATUS gateResult = WriteDwordValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
                                                kMicAudioApoGateThresholdCent,
                                                std::clamp(gateThresholdCent, 120u, 600u));
-    if (FAILED(endpointResult) || highPassResult != ERROR_SUCCESS || gateResult != ERROR_SUCCESS) {
+    const LSTATUS noiseReductionResult = WriteDwordValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
+                                                         kMicAudioApoNoiseReductionPercent,
+                                                         std::clamp(noiseReductionPercent, 0u, 100u));
+    if (FAILED(endpointResult) || highPassResult != ERROR_SUCCESS || gateResult != ERROR_SUCCESS ||
+        noiseReductionResult != ERROR_SUCCESS) {
         RestoreEndpointProperty();
         UnregisterApoFromAudioEngine();
         CallDllRegistration("DllUnregisterServer");
@@ -411,8 +425,11 @@ bool InstallApo(UINT highPassHz, UINT gateThresholdCent, std::wstring* error) {
             *error = L"Could not write the USB microphone audio-effect property: " + ErrorText(endpointResult);
         } else if (highPassResult != ERROR_SUCCESS) {
             *error = L"Could not save the high-pass setting: " + ErrorText(HRESULT_FROM_WIN32(highPassResult));
-        } else {
+        } else if (gateResult != ERROR_SUCCESS) {
             *error = L"Could not save the gate setting: " + ErrorText(HRESULT_FROM_WIN32(gateResult));
+        } else {
+            *error = L"Could not save the noise-reduction setting: " +
+                     ErrorText(HRESULT_FROM_WIN32(noiseReductionResult));
         }
         return false;
     }
@@ -463,6 +480,7 @@ HWND g_window = nullptr;
 HWND g_status = nullptr;
 HWND g_highPass = nullptr;
 HWND g_gate = nullptr;
+HWND g_noiseReduction = nullptr;
 
 void SetStatus(const std::wstring& text) {
     if (g_status != nullptr) SetWindowTextW(g_status, text.c_str());
@@ -509,15 +527,22 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         g_gate = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"2.50",
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                  415, 88, 65, 26, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kGateEdit)), nullptr, nullptr);
+        HWND noiseReductionLabel = CreateWindowW(L"STATIC", L"Noise reduction (%):", WS_CHILD | WS_VISIBLE,
+                                                 16, 130, 150, 24, window, nullptr, nullptr, nullptr);
+        g_noiseReduction = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"82",
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
+                                            150, 126, 80, 26, window,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kNoiseReductionEdit)), nullptr, nullptr);
         HWND install = CreateWindowW(L"BUTTON", L"Install direct cleaner",
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                     16, 132, 180, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kInstallButton)), nullptr, nullptr);
+                                     16, 170, 180, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kInstallButton)), nullptr, nullptr);
         HWND uninstall = CreateWindowW(L"BUTTON", L"Uninstall",
                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                       206, 132, 100, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUninstallButton)), nullptr, nullptr);
+                                       206, 170, 100, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUninstallButton)), nullptr, nullptr);
         g_status = CreateWindowW(L"STATIC", L"Checking target mic...", WS_CHILD | WS_VISIBLE,
-                                 16, 178, 460, 42, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStatusText)), nullptr, nullptr);
-        for (HWND control : {title, explanation, highPassLabel, g_highPass, gateLabel, g_gate, install, uninstall, g_status}) {
+                                 16, 216, 460, 54, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStatusText)), nullptr, nullptr);
+        for (HWND control : {title, explanation, highPassLabel, g_highPass, gateLabel, g_gate,
+                             noiseReductionLabel, g_noiseReduction, install, uninstall, g_status}) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
         DWORD savedHighPass = 0;
@@ -536,6 +561,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                        static_cast<float>(std::clamp<DWORD>(savedGateCent, 120, 600)) / 100.0f);
             SetWindowTextW(g_gate, gateText);
         }
+        DWORD savedNoiseReduction = 0;
+        if (ReadDwordValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
+                           kMicAudioApoNoiseReductionPercent, &savedNoiseReduction)) {
+            wchar_t reductionText[16] = {};
+            swprintf_s(reductionText, L"%u",
+                       std::clamp<DWORD>(savedNoiseReduction, 0, 100));
+            SetWindowTextW(g_noiseReduction, reductionText);
+        }
         RefreshStatus();
         return 0;
     }
@@ -544,15 +577,18 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         if (LOWORD(wParam) == kInstallButton) {
             float highPass = 0.0f;
             float gate = 0.0f;
+            float noiseReduction = 0.0f;
             if (!ReadEditNumber(g_highPass, 40.0f, 300.0f, &highPass) ||
-                !ReadEditNumber(g_gate, 1.2f, 6.0f, &gate)) {
-                MessageBoxW(window, L"Use high-pass 40-300 and gate threshold 1.2-6.0.",
+                !ReadEditNumber(g_gate, 1.2f, 6.0f, &gate) ||
+                !ReadEditNumber(g_noiseReduction, 0.0f, 100.0f, &noiseReduction)) {
+                MessageBoxW(window, L"Use high-pass 40-300, gate threshold 1.2-6.0, and noise reduction 0-100.",
                             L"Invalid settings", MB_OK | MB_ICONWARNING);
                 return 0;
             }
-            wchar_t parameters[128] = {};
-            swprintf_s(parameters, L"/install /highpass %u /gate %u",
-                       static_cast<UINT>(highPass), static_cast<UINT>(gate * 100.0f + 0.5f));
+            wchar_t parameters[160] = {};
+            swprintf_s(parameters, ARRAYSIZE(parameters), L"/install /highpass %u /gate %u /reduction %u",
+                       static_cast<UINT>(highPass), static_cast<UINT>(gate * 100.0f + 0.5f),
+                       static_cast<UINT>(noiseReduction + 0.5f));
             if (LaunchElevated(parameters)) SetStatus(L"Administrator installer started. Close and reopen audio apps afterward.");
             else SetStatus(L"Installation was canceled or could not be elevated.");
             return 0;
@@ -586,7 +622,7 @@ int RunGui(HINSTANCE instance) {
 
     g_window = CreateWindowExW(0, kWindowClass, L"Mic Audio Cleaner",
                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                               CW_USEDEFAULT, CW_USEDEFAULT, 520, 270,
+                               CW_USEDEFAULT, CW_USEDEFAULT, 520, 320,
                                nullptr, nullptr, instance, nullptr);
     if (g_window == nullptr) return 1;
     ShowWindow(g_window, SW_SHOW);
@@ -627,10 +663,12 @@ int RunAudioApoCommandLine(HINSTANCE instance) {
     if (install) {
         UINT highPass = kDefaultHighPassHz;
         UINT gate = kDefaultGateThresholdCent;
+        UINT noiseReduction = kDefaultNoiseReductionPercent;
         GetArgumentValue(argc, argv, L"/highpass", &highPass);
         GetArgumentValue(argc, argv, L"/gate", &gate);
+        GetArgumentValue(argc, argv, L"/reduction", &noiseReduction);
         std::wstring error;
-        if (InstallApo(highPass, gate, &error)) {
+        if (InstallApo(highPass, gate, noiseReduction, &error)) {
             MessageBoxW(nullptr,
                         L"The direct cleaner was installed. Close and reopen the STT application so it opens a new audio graph.",
                         L"Mic Audio Cleaner", MB_OK | MB_ICONINFORMATION);

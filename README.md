@@ -26,7 +26,9 @@ Right-click the microphone tray icon to enable or disable remapping, open config
 
 ### Virtual-cable cleaner
 
-Open `Audio cleaner (virtual cable)` from the tray menu. Select the USB PnP microphone as the input and a virtual cable playback endpoint, usually `CABLE Input`, as the output. Select the matching recording endpoint, usually `CABLE Output`, in the STT application.
+Open `Audio cleaner (virtual cable)` from the tray menu. Select the USB PnP microphone as the input and a virtual cable playback endpoint, usually `CABLE Input`, as the destination. Select the matching recording endpoint, usually `CABLE Output`, in the STT application. The destination is intentionally a playback endpoint because the cleaner renders audio into it; the matching recording endpoint is what STT reads.
+
+This executable cannot create a new Windows microphone endpoint on its own. If no virtual-cable playback/recording pair appears, install and configure a virtual audio cable separately, then click `Refresh devices`. Selecting speakers or headphones only monitors the cleaned signal and is not usable as an STT microphone, so the cleaner blocks that route.
 
 The cleaner applies a 90 Hz high-pass filter, 50 Hz and 100 Hz hum notches, adaptive spectral noise reduction, and a soft gate. Its settings are stored at `%APPDATA%\MicHotkeyRemapper\audio-cleaner.ini`.
 
@@ -38,7 +40,7 @@ Open `Audio cleaner (direct device)` while `Microphone (USB PnP Sound Device)` i
 
 The direct cleaner is bundled into the same executable. Windows requires an actual DLL for an audio processing object, so installation extracts the embedded payload to `%ProgramData%\MicHotkeyRemapper`. This is an implementation detail and is not a second application that must be distributed beside the EXE.
 
-The direct cleaner requires administrator permission. Close and reopen audio applications after installing, changing, or uninstalling it. Use either the virtual-cable route or the direct-device route for a given STT setup, not both.
+The direct cleaner requires administrator permission. Close and reopen audio applications after installing, changing, or uninstalling it. It now includes adaptive spectral noise reduction in addition to the high-pass, hum notches, and gate. Use either the virtual-cable route or the direct-device route for a given STT setup, not both.
 
 ## Building
 
@@ -46,16 +48,17 @@ Install the Visual Studio C++ build tools and Windows SDK. From a Visual Studio 
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\build-release.ps1 -Version 1.4.1 -Clean
+.\scripts\build-release-both.ps1 -Version 1.4.5 -Clean
 ```
 
-The script builds the APO DLL as an intermediate input, embeds it in the final remapper executable, and writes these ignored outputs:
+The multi-architecture script invokes the Visual Studio tools for both targets. It builds the APO DLL as an intermediate input, embeds the matching DLL in each final remapper executable, and writes these ignored outputs:
 
-- `build\release\mic-hotkey-remapper.exe`
-- `dist\mic-hotkey-remapper-v1.4.1.zip`
-- `dist\mic-hotkey-remapper-v1.4.1.zip.sha256`
+- `build\release-x64\mic-hotkey-remapper.exe`
+- `build\release-arm64\mic-hotkey-remapper.exe`
+- `dist\mic-hotkey-remapper-v1.4.5.zip`
+- `dist\mic-hotkey-remapper-v1.4.5.zip.sha256`
 
-The shipped ZIP contains the remapper EXE, this README, and the MIT license. The intermediate APO DLL is not shipped beside the EXE.
+The shipped ZIP contains `x64\mic-hotkey-remapper.exe` and `arm64\mic-hotkey-remapper.exe`, each with its matching audio cleaner embedded, plus this README and the MIT license. Run the ARM64 executable on ARM64 Windows. Run the x64 executable on regular Intel or AMD Windows. The intermediate APO DLL is not shipped beside either EXE.
 
 ## Release
 

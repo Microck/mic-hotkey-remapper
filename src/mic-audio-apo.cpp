@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <new>
 #include <string>
 
@@ -39,6 +40,9 @@ constexpr UINT kMaxChannels = 8;
 constexpr float kPi = 3.14159265358979323846f;
 constexpr UINT kDefaultHighPassHz = 90;
 constexpr UINT kDefaultGateThresholdCent = 250;
+constexpr UINT kDefaultNoiseReductionPercent = 82;
+constexpr UINT kFftSize = 256;
+constexpr UINT kHopSize = kFftSize / 2;
 
 struct Biquad {
     void Configure(float sampleRate, float frequency, float quality) noexcept {
@@ -73,13 +77,152 @@ struct Biquad {
     float output2 = 0.0f;
 };
 
+void FourierTransform(std::array<std::complex<float>, kFftSize>& values, bool inverse) noexcept {
+    for (UINT index = 1, bitReversed = 0; index < kFftSize; ++index) {
+        UINT bit = kFftSize >> 1;
+        for (; bitReversed & bit; bit >>= 1) bitReversed ^= bit;
+        bitReversed ^= bit;
+        if (index < bitReversed) std::swap(values[index], values[bitReversed]);
+    }
+
+    for (UINT length = 2; length <= kFftSize; length <<= 1) {
+        const float angle = 2.0f * kPi / static_cast<float>(length) * (inverse ? 1.0f : -1.0f);
+        const std::complex<float> step(std::cos(angle), std::sin(angle));
+        for (UINT start = 0; start < kFftSize; start += length) {
+            std::complex<float> current(1.0f, 0.0f);
+            for (UINT offset = 0; offset < length / 2; ++offset) {
+                const std::complex<float> even = values[start + offset];
+                const std::complex<float> odd = current * values[start + offset + length / 2];
+                values[start + offset] = even + odd;
+                values[start + offset + length / 2] = even - odd;
+                current *= step;
+            }
+        }
+    }
+
+    if (inverse) {
+        for (auto& value : values) value /= static_cast<float>(kFftSize);
+    }
+}
+
+class SpectralDenoiser {
+public:
+    void Configure(UINT sampleRate, float noiseReduction, float gateThreshold) noexcept {
+        sampleRate_ = std::max<UINT>(1, sampleRate);
+        suppressionStrength_ = std::clamp(noiseReduction / 100.0f, 0.0f, 1.0f);
+        gateThreshold_ = std::clamp(gateThreshold, 1.2f, 6.0f);
+        for (UINT index = 0; index < kFftSize; ++index) {
+            window_[index] = 0.5f - 0.5f * std::cos(2.0f * kPi * static_cast<float>(index) /
+                                                     static_cast<float>(kFftSize));
+        }
+        Reset();
+    }
+
+    void Reset() noexcept {
+        input_.fill(0.0f);
+        overlap_.fill(0.0f);
+        output_.fill(0.0f);
+        noiseMagnitudes_.fill(0.001f);
+        inputCount_ = 0;
+        outputRead_ = 0;
+        outputWrite_ = 0;
+        outputCount_ = 0;
+        noiseFloor_ = 0.01f;
+        gateGain_ = 0.04f;
+        calibrationBlocks_ = std::max<UINT>(1, sampleRate_ / kHopSize);
+    }
+
+    float Process(float sample) noexcept {
+        input_[inputCount_++] = sample;
+        if (inputCount_ == kFftSize) ProcessFrame();
+        if (outputCount_ == 0) return 0.0f;
+
+        const float result = output_[outputRead_];
+        outputRead_ = (outputRead_ + 1) % static_cast<UINT>(output_.size());
+        --outputCount_;
+        return result;
+    }
+
+private:
+    void Enqueue(float value) noexcept {
+        if (outputCount_ == output_.size()) {
+            outputRead_ = (outputRead_ + 1) % static_cast<UINT>(output_.size());
+            --outputCount_;
+        }
+        output_[outputWrite_] = value;
+        outputWrite_ = (outputWrite_ + 1) % static_cast<UINT>(output_.size());
+        ++outputCount_;
+    }
+
+    void ProcessFrame() noexcept {
+        float blockPower = 0.0f;
+        for (UINT index = 0; index < kFftSize; ++index) blockPower += input_[index] * input_[index];
+        const float blockRms = std::sqrt(blockPower / static_cast<float>(kFftSize));
+        const bool quiet = blockRms < noiseFloor_ * gateThreshold_;
+
+        if (calibrationBlocks_ > 0) {
+            noiseFloor_ = noiseFloor_ * 0.98f + blockRms * 0.02f;
+            --calibrationBlocks_;
+        } else if (quiet) {
+            noiseFloor_ = noiseFloor_ * 0.995f + blockRms * 0.005f;
+        }
+
+        for (UINT index = 0; index < kFftSize; ++index) {
+            spectrum_[index] = input_[index] * window_[index];
+        }
+        FourierTransform(spectrum_, false);
+
+        for (UINT index = 0; index < kFftSize; ++index) {
+            const float magnitude = std::abs(spectrum_[index]);
+            if (calibrationBlocks_ > 0 || quiet) {
+                noiseMagnitudes_[index] = noiseMagnitudes_[index] * 0.97f + magnitude * 0.03f;
+            }
+            const float power = magnitude * magnitude;
+            const float noisePower = noiseMagnitudes_[index] * noiseMagnitudes_[index];
+            const float ratio = noisePower / std::max(power, 0.0000001f);
+            const float gain = std::clamp(1.0f - suppressionStrength_ * ratio, 0.12f, 1.0f);
+            spectrum_[index] *= gain;
+        }
+        FourierTransform(spectrum_, true);
+
+        const float targetGate = quiet ? 0.04f : 1.0f;
+        for (UINT index = 0; index < kHopSize; ++index) {
+            const float scale = 4.0f / 3.0f;
+            const float firstHalf = spectrum_[index].real() * window_[index] * scale + overlap_[index];
+            overlap_[index] = spectrum_[index + kHopSize].real() * window_[index + kHopSize] * scale;
+            const float smoothing = targetGate > gateGain_ ? 0.12f : 0.025f;
+            gateGain_ += (targetGate - gateGain_) * smoothing;
+            Enqueue(firstHalf * gateGain_);
+        }
+
+        for (UINT index = 0; index < kHopSize; ++index) input_[index] = input_[index + kHopSize];
+        inputCount_ = kHopSize;
+    }
+
+    UINT sampleRate_ = 48000;
+    float suppressionStrength_ = static_cast<float>(kDefaultNoiseReductionPercent) / 100.0f;
+    float gateThreshold_ = static_cast<float>(kDefaultGateThresholdCent) / 100.0f;
+    float noiseFloor_ = 0.01f;
+    float gateGain_ = 0.04f;
+    UINT calibrationBlocks_ = 1;
+    UINT inputCount_ = 0;
+    UINT outputRead_ = 0;
+    UINT outputWrite_ = 0;
+    UINT outputCount_ = 0;
+    std::array<float, kFftSize> input_{};
+    std::array<float, kFftSize> window_{};
+    std::array<float, kHopSize> overlap_{};
+    std::array<float, kFftSize> noiseMagnitudes_{};
+    std::array<float, kFftSize> output_{};
+    std::array<std::complex<float>, kFftSize> spectrum_{};
+};
+
 struct ChannelState {
     Biquad notch50;
     Biquad notch100;
+    SpectralDenoiser denoiser;
     float highPassState = 0.0f;
     float previousInput = 0.0f;
-    float gateGain = 0.04f;
-    float envelope = 0.0f;
 };
 
 MIDL_INTERFACE("6C4F3C8A-7E21-4B2D-9F73-28916542C03E")
@@ -128,9 +271,8 @@ private:
     UINT channelCount_ = 1;
     float highPassHz_ = static_cast<float>(kDefaultHighPassHz);
     float gateThreshold_ = static_cast<float>(kDefaultGateThresholdCent) / 100.0f;
+    float noiseReduction_ = static_cast<float>(kDefaultNoiseReductionPercent);
     float highPassAlpha_ = 0.0f;
-    float noiseFloor_ = 0.01f;
-    UINT64 calibrationSamples_ = 0;
     volatile LONG referenceCount_;
 };
 
@@ -140,7 +282,7 @@ const AVRT_DATA CRegAPOProperties<1> CMicAudioCleanerApo::sm_RegProperties(
     L"Microck",
     1,
     0,
-    IID_IMicAudioCleanerApo);
+    IID_IAudioProcessingObject);
 
 void CMicAudioCleanerApo::LoadSettings() noexcept {
     HKEY key = nullptr;
@@ -158,6 +300,12 @@ void CMicAudioCleanerApo::LoadSettings() noexcept {
     if (RegGetValueW(key, nullptr, kMicAudioApoGateThresholdCent, RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS) {
         gateThreshold_ = std::clamp(static_cast<float>(value) / 100.0f, 1.2f, 6.0f);
     }
+    value = kDefaultNoiseReductionPercent;
+    size = sizeof(value);
+    if (RegGetValueW(key, nullptr, kMicAudioApoNoiseReductionPercent, RRF_RT_REG_DWORD,
+                     nullptr, &value, &size) == ERROR_SUCCESS) {
+        noiseReduction_ = static_cast<float>(std::clamp(value, static_cast<DWORD>(0), static_cast<DWORD>(100)));
+    }
     RegCloseKey(key);
 }
 
@@ -166,13 +314,11 @@ void CMicAudioCleanerApo::ConfigureState() noexcept {
     channelCount_ = std::min<UINT>(GetSamplesPerFrame(), kMaxChannels);
     const float cutoff = std::clamp(highPassHz_, 40.0f, 300.0f);
     highPassAlpha_ = (2.0f * kPi * cutoff) / (2.0f * kPi * cutoff + static_cast<float>(sampleRate_));
-    noiseFloor_ = 0.01f;
-    calibrationSamples_ = static_cast<UINT64>(sampleRate_);
-
     for (UINT channel = 0; channel < kMaxChannels; ++channel) {
         channels_[channel] = {};
         channels_[channel].notch50.Configure(static_cast<float>(sampleRate_), 50.0f, 10.0f);
         channels_[channel].notch100.Configure(static_cast<float>(sampleRate_), 100.0f, 10.0f);
+        channels_[channel].denoiser.Configure(sampleRate_, noiseReduction_, gateThreshold_);
     }
 }
 
@@ -262,6 +408,9 @@ STDMETHODIMP_(void) CMicAudioCleanerApo::APOProcess(
     const UINT channels = std::max<UINT>(1, channelCount_);
     if (input->u32BufferFlags == BUFFER_SILENT) {
         ZeroMemory(destination, sizeof(float) * input->u32ValidFrameCount * channels);
+        for (UINT channel = 0; channel < channels; ++channel) {
+            channels_[std::min(channel, kMaxChannels - 1)].denoiser.Reset();
+        }
         output->u32BufferFlags = BUFFER_SILENT;
         return;
     }
@@ -271,7 +420,6 @@ STDMETHODIMP_(void) CMicAudioCleanerApo::APOProcess(
     }
 
     for (UINT32 frame = 0; frame < input->u32ValidFrameCount; ++frame) {
-        float frameEnergy = 0.0f;
         for (UINT channel = 0; channel < channels; ++channel) {
             ChannelState& state = channels_[std::min(channel, kMaxChannels - 1)];
             const float sample = source[frame * channels + channel];
@@ -280,26 +428,7 @@ STDMETHODIMP_(void) CMicAudioCleanerApo::APOProcess(
             state.highPassState = highPassed;
             float cleaned = state.notch50.Process(highPassed);
             cleaned = state.notch100.Process(cleaned);
-            state.envelope += (std::fabs(cleaned) - state.envelope) * 0.001f;
-            frameEnergy += state.envelope;
-            destination[frame * channels + channel] = cleaned;
-        }
-
-        frameEnergy /= static_cast<float>(channels);
-        if (calibrationSamples_ > 0) {
-            noiseFloor_ = noiseFloor_ * 0.999f + frameEnergy * 0.001f;
-            --calibrationSamples_;
-        } else if (frameEnergy < noiseFloor_ * gateThreshold_) {
-            noiseFloor_ = noiseFloor_ * 0.9995f + frameEnergy * 0.0005f;
-        }
-
-        const bool quiet = frameEnergy < noiseFloor_ * gateThreshold_;
-        const float targetGain = quiet ? 0.04f : 1.0f;
-        for (UINT channel = 0; channel < channels; ++channel) {
-            ChannelState& state = channels_[std::min(channel, kMaxChannels - 1)];
-            const float smoothing = targetGain > state.gateGain ? 0.12f : 0.025f;
-            state.gateGain += (targetGain - state.gateGain) * smoothing;
-            destination[frame * channels + channel] *= state.gateGain;
+            destination[frame * channels + channel] = state.denoiser.Process(cleaned);
         }
     }
     output->u32BufferFlags = BUFFER_VALID;
