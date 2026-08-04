@@ -33,6 +33,11 @@ constexpr wchar_t kBackgroundClass[] = L"MicHotkeyRemapper.Background";
 constexpr wchar_t kConfigClass[] = L"MicHotkeyRemapper.Config";
 constexpr wchar_t kMutexName[] = L"Local\\MicHotkeyRemapper.08BB.2902";
 constexpr wchar_t kTargetToken[] = L"vid_08bb&pid_2902";
+#if defined(_M_ARM64)
+constexpr wchar_t kEmbeddedApoFileName[] = L"mic-audio-apo-arm64.dll";
+#else
+constexpr wchar_t kEmbeddedApoFileName[] = L"mic-audio-apo-x64.dll";
+#endif
 constexpr UINT kReloadMessage = WM_APP + 1;
 constexpr UINT kTrayMessage = WM_APP + 2;
 constexpr UINT kTrayToggle = 2001;
@@ -764,7 +769,7 @@ bool ExtractEmbeddedApo(std::wstring* path) {
     }
     const std::wstring directory = std::wstring(commonData) + L"\\MicHotkeyRemapper";
     CreateDirectoryW(directory.c_str(), nullptr);
-    const std::wstring target = directory + L"\\mic-audio-apo.dll";
+    const std::wstring target = directory + L"\\" + kEmbeddedApoFileName;
 
     WIN32_FILE_ATTRIBUTE_DATA existing = {};
     if (GetFileAttributesExW(target.c_str(), GetFileExInfoStandard, &existing)) {

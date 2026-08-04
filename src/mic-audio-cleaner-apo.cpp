@@ -34,6 +34,11 @@ namespace {
 constexpr wchar_t kWindowClass[] = L"MicAudioCleanerApo.Window";
 constexpr wchar_t kTargetName[] = L"USB PnP Sound Device";
 constexpr wchar_t kCurrentApoClsid[] = L"{A1D5E6F4-4E58-4D67-A42A-5114A9B4E177}";
+#if defined(_M_ARM64)
+constexpr wchar_t kApoDllFileName[] = L"mic-audio-apo-arm64.dll";
+#else
+constexpr wchar_t kApoDllFileName[] = L"mic-audio-apo-x64.dll";
+#endif
 constexpr UINT kDefaultHighPassHz = 90;
 constexpr UINT kDefaultGateThresholdCent = 250;
 constexpr UINT kDefaultNoiseReductionPercent = 82;
@@ -102,7 +107,7 @@ std::wstring SiblingPath(const wchar_t* name) {
 }
 
 std::wstring ApoDllPath() {
-    return g_embeddedApoDllPath.empty() ? SiblingPath(L"mic-audio-apo.dll") : g_embeddedApoDllPath;
+    return g_embeddedApoDllPath.empty() ? SiblingPath(kApoDllFileName) : g_embeddedApoDllPath;
 }
 
 std::wstring FriendlyName(IMMDevice* device) {

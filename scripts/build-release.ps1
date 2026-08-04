@@ -77,6 +77,7 @@ try {
     Invoke-Native "rc.exe" @(
         "/nologo", "/I", $sourceRoot,
         "/fo", (Join-Path $buildRoot "mic-hotkey-remapper-resources.res"),
+        "/d", "MIC_AUDIO_APO_$($Architecture.ToUpperInvariant())",
         (Join-Path $resourceRoot "mic-hotkey-remapper-resources.rc")
     )
 

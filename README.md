@@ -48,15 +48,15 @@ Install the Visual Studio C++ build tools and Windows SDK. From a Visual Studio 
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\build-release-both.ps1 -Version 1.4.5 -Clean
+.\scripts\build-release-both.ps1 -Version 1.4.6 -Clean
 ```
 
 The multi-architecture script invokes the Visual Studio tools for both targets. It builds the APO DLL as an intermediate input, embeds the matching DLL in each final remapper executable, and writes these ignored outputs:
 
 - `build\release-x64\mic-hotkey-remapper.exe`
 - `build\release-arm64\mic-hotkey-remapper.exe`
-- `dist\mic-hotkey-remapper-v1.4.5.zip`
-- `dist\mic-hotkey-remapper-v1.4.5.zip.sha256`
+- `dist\mic-hotkey-remapper-v1.4.6.zip`
+- `dist\mic-hotkey-remapper-v1.4.6.zip.sha256`
 
 The shipped ZIP contains `x64\mic-hotkey-remapper.exe` and `arm64\mic-hotkey-remapper.exe`, each with its matching audio cleaner embedded, plus this README and the MIT license. Run the ARM64 executable on ARM64 Windows. Run the x64 executable on regular Intel or AMD Windows. The intermediate APO DLL is not shipped beside either EXE.
 
