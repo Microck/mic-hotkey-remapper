@@ -1,73 +1,66 @@
 # mic-hotkey-remapper
 
-windows utility that watches a specific USB microphone (`VID_08BB` / `PID_2902`) and fires a configurable hotkey when the device connects or disconnects. built for [this desk mic](https://s.click.aliexpress.com/e/_c3EKq1QJ).
+Small Windows tray utility for the generic USB PnP desk microphone sold with a physical mute button.
 
-the mic physically disconnects when its mute button is toggled off, so this watches USB presence instead of HID input.
+The microphone disconnects from USB when its button is toggled off. This utility watches that USB presence state and sends a configurable keyboard shortcut when the microphone connects or disconnects.
 
-<img width="422" height="267" alt="image" src="https://github.com/user-attachments/assets/ff495b1d-e92b-41f4-a272-8b451967cbbe" />
+## Features
 
+- Hold mode: hold the configured shortcut while the microphone is connected.
+- Tap mode: press the configured shortcut once on connect and once on disconnect.
+- Native modifier combinations such as `CTRL+ALT+F13`.
+- Green/red microphone tray icon showing whether remapping is enabled.
+- Session-only tray toggle to disable remapping without closing the application.
+- Built-in virtual-cable audio cleaner with high-pass, hum notch, noise reduction, and gate controls.
+- Optional direct-device audio cleaner that keeps the original microphone endpoint available to STT applications.
 
----
+## Usage
 
-### modes
+Run `mic-hotkey-remapper.exe`. On first launch, select a mode, click the shortcut field, press a key combination, and save.
 
-- **hold**: device arrival sends key-down, device removal sends key-up.
-- **tap**: each arrival/removal sends one complete key press.
+Configuration is stored at `%APPDATA%\MicHotkeyRemapper\config.ini`. No administrator permission is needed for remapping. The `Start with Windows` option starts the remapper at logon.
 
----
+Right-click the microphone tray icon to enable or disable remapping, open configuration, open either audio cleaner, or exit. Disabling remapping releases a held shortcut immediately.
 
-### usage
+## Audio cleanup
 
-run the exe. a config window opens on first launch. pick a mode, click the shortcut field, press a key combo (e.g. `CTRL+ALT+F13`), and save.
+### Virtual-cable cleaner
 
-config is stored at `%APPDATA%\MicHotkeyRemapper\config.ini`. enable `Start with Windows` to run at logon. no admin privileges required.
+Open `Audio cleaner (virtual cable)` from the tray menu. Select the USB PnP microphone as the input and a virtual cable playback endpoint, usually `CABLE Input`, as the output. Select the matching recording endpoint, usually `CABLE Output`, in the STT application.
 
-when running, the app places a microphone icon in the notification area. green means remapping is enabled; red means it is disabled. right-click the icon to enable or disable remapping, open configuration, or exit. disabling remapping is session-only and releases a held shortcut immediately.
+The cleaner applies a 90 Hz high-pass filter, 50 Hz and 100 Hz hum notches, adaptive spectral noise reduction, and a soft gate. Its settings are stored at `%APPDATA%\MicHotkeyRemapper\audio-cleaner.ini`.
 
-the tray menu also opens either embedded audio-cleaner mode. No second cleaner executable is required.
+Keep the microphone silent for about one second after starting so the cleaner can measure the noise floor. Lower the gate threshold if quiet speech is cut off, or increase noise reduction if hiss remains during speech.
 
----
+### Direct-device cleaner
 
-### build
+Open `Audio cleaner (direct device)` while `Microphone (USB PnP Sound Device)` is connected. Choose the high-pass and gate settings, then click `Install direct cleaner`. This installs the tuned cleanup into the original microphone endpoint, so STT applications can keep selecting the original microphone instead of a virtual cable.
 
-open a Visual Studio Developer Command Prompt:
+The direct cleaner is bundled into the same executable. Windows requires an actual DLL for an audio processing object, so installation extracts the embedded payload to `%ProgramData%\MicHotkeyRemapper`. This is an implementation detail and is not a second application that must be distributed beside the EXE.
 
+The direct cleaner requires administrator permission. Close and reopen audio applications after installing, changing, or uninstalling it. Use either the virtual-cable route or the direct-device route for a given STT setup, not both.
+
+## Building
+
+Install the Visual Studio C++ build tools and Windows SDK. From a Visual Studio Developer Command Prompt, run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\build-release.ps1 -Version 1.4.0 -Clean
 ```
-mkdir release-build
-cl /nologo /std:c++17 /O2 /MT /LD /EHsc- mic-audio-apo.cpp /Fo release-build\\mic-audio-apo.obj /link /SUBSYSTEM:WINDOWS /NODEFAULTLIB:atls.lib /DEF:mic-audio-apo.def /OUT:release-build\\mic-audio-apo.dll
-rc /nologo /fo release-build\\mic-hotkey-remapper-resources.res mic-hotkey-remapper-resources.rc
-cl /nologo /std:c++17 /O2 /MT /EHsc /D MIC_HOTKEY_REMAPPER_EMBEDDED /c mic-audio-cleaner.cpp /Fo release-build\\mic-audio-cleaner.obj
-cl /nologo /std:c++17 /O2 /MT /EHsc /D MIC_HOTKEY_REMAPPER_EMBEDDED /c mic-audio-cleaner-apo.cpp /Fo release-build\\mic-audio-cleaner-apo.obj
-cl /nologo /std:c++17 /O2 /MT /EHsc /c mic-hotkey-remapper.cpp /Fo release-build\\mic-hotkey-remapper.obj
-cl /nologo release-build\\mic-hotkey-remapper.obj release-build\\mic-audio-cleaner.obj release-build\\mic-audio-cleaner-apo.obj release-build\\mic-hotkey-remapper-resources.res /link /SUBSYSTEM:WINDOWS /OUT:release-build\\mic-hotkey-remapper.exe
-```
 
-The APO DLL is an intermediate build input. It is embedded into the final remapper executable as a resource and is not needed beside the shipped EXE. Libraries are linked by pragmas in the source.
+The script builds the APO DLL as an intermediate input, embeds it in the final remapper executable, and writes these ignored outputs:
 
----
+- `build\release\mic-hotkey-remapper.exe`
+- `dist\mic-hotkey-remapper-v1.4.0.zip`
+- `dist\mic-hotkey-remapper-v1.4.0.zip.sha256`
 
-### audio cleanup
+The shipped ZIP contains the remapper EXE, this README, and the MIT license. The intermediate APO DLL is not shipped beside the EXE.
 
-The virtual-cable cleaner is opened from the remapper tray menu. It captures a microphone with WASAPI, applies a 90 Hz high-pass filter, fixed 50/100 Hz hum notches tuned for the USB PnP mic, adaptive spectral noise suppression, and a soft noise gate, then renders the cleaned stream to a selectable Windows audio output.
+## Release
 
-for STT, install a software virtual audio cable such as VB-CABLE. select its playback endpoint, usually named `CABLE Input`, as the cleaner output. then select the matching recording endpoint, usually named `CABLE Output`, as the microphone in the STT application.
+Published releases and signed checksums are available on the [GitHub releases page](https://github.com/Microck/mic-hotkey-remapper/releases).
 
-the cleaner exposes three settings: high-pass cutoff in Hz, noise reduction percentage, and gate threshold as a multiple of the measured noise floor. start with the default values, keep the mic silent for about one second after starting, then lower the gate threshold if quiet speech is being cut off or increase noise reduction if hiss remains during speech.
+## License
 
-the cleaner keeps retrying the configured devices, so it can recover when this microphone disconnects while its physical button is toggled off. its settings are stored at `%APPDATA%\MicHotkeyRemapper\audio-cleaner.ini`.
-
-### direct-device cleanup
-
-The direct-device cleaner is also opened from the remapper tray menu. This is the no-cable option. Open it while `Microphone (USB PnP Sound Device)` is connected, choose the high-pass and gate settings, and click `Install direct cleaner`. Windows will then run the tuned cleanup inside the original microphone endpoint, so STT applications can keep selecting the original microphone instead of a virtual cable.
-
-The direct option is bundled in the same remapper executable. When installing or uninstalling, it extracts its embedded APO payload to `%ProgramData%\\MicHotkeyRemapper` because the Windows audio engine requires an actual DLL for an APO. That extracted file is an implementation detail, not a second app or a file that needs to be distributed beside the remapper.
-
-the direct option requires administrator permission and applies a low-latency real-time profile: 90 Hz high-pass by default, 50/100 Hz hum notches measured from this USB PnP mic, and a soft adaptive gate. The portable virtual-cable cleaner remains the stronger option when adaptive spectral noise reduction is needed. Use one route or the other for a given STT setup, not both.
-
-close and reopen audio applications after installing or changing the direct profile. Use the same installer to uninstall it and restore the endpoint's previous effect setting.
-
----
-
-### license
-
-MIT
+MIT. See [LICENSE](LICENSE).
