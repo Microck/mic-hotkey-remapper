@@ -1,7 +1,0 @@
-LIBRARY "mic-audio-apo"
-
-EXPORTS
-    DllCanUnloadNow PRIVATE
-    DllGetClassObject PRIVATE
-    DllRegisterServer PRIVATE
-    DllUnregisterServer PRIVATE
