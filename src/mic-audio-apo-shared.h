@@ -10,8 +10,6 @@ DEFINE_GUID(CLSID_MicAudioCleanerApo,
 DEFINE_GUID(IID_IMicAudioCleanerApo,
     0x6c4f3c8a, 0x7e21, 0x4b2d, 0x9f, 0x73, 0x28, 0x91, 0x65, 0x42, 0xc0, 0x3e);
 
-constexpr wchar_t kMicAudioApoFxProperty[] =
-    L"{D04E05A6-594B-4fb6-A80D-01AF5EED7D1D},7";
 constexpr wchar_t kMicAudioApoRegistryPath[] =
     L"SOFTWARE\\MicHotkeyRemapper\\AudioApo";
 constexpr wchar_t kMicAudioApoInstalledEndpoint[] = L"EndpointRegistryId";

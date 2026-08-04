@@ -46,14 +46,14 @@ Install the Visual Studio C++ build tools and Windows SDK. From a Visual Studio 
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\build-release.ps1 -Version 1.4.0 -Clean
+.\scripts\build-release.ps1 -Version 1.4.1 -Clean
 ```
 
 The script builds the APO DLL as an intermediate input, embeds it in the final remapper executable, and writes these ignored outputs:
 
 - `build\release\mic-hotkey-remapper.exe`
-- `dist\mic-hotkey-remapper-v1.4.0.zip`
-- `dist\mic-hotkey-remapper-v1.4.0.zip.sha256`
+- `dist\mic-hotkey-remapper-v1.4.1.zip`
+- `dist\mic-hotkey-remapper-v1.4.1.zip.sha256`
 
 The shipped ZIP contains the remapper EXE, this README, and the MIT license. The intermediate APO DLL is not shipped beside the EXE.
 

@@ -3,6 +3,7 @@
 #define NOMINMAX
 
 #include <windows.h>
+#include <initguid.h>
 #include <audioclient.h>
 #include <audioenginebaseapo.h>
 #include <functiondiscoverykeys_devpkey.h>
@@ -17,7 +18,6 @@
 #include <string>
 #include <vector>
 
-#include <initguid.h>
 #include "mic-audio-apo-shared.h"
 
 #pragma comment(lib, "Advapi32.lib")
@@ -149,9 +149,72 @@ bool FindTargetEndpoint(TargetEndpoint* target) {
     return false;
 }
 
-std::wstring FxRegistryPath(const std::wstring& endpointRegistryId) {
-    return L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture\\" +
-           endpointRegistryId + L"\\FxProperties";
+HRESULT OpenEndpointPropertyStore(const std::wstring& endpointId, DWORD mode,
+                                   ComPtr<IPropertyStore>* store) {
+    if (store == nullptr) return E_POINTER;
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                      IID_PPV_ARGS(enumerator.put()));
+    if (FAILED(result)) return result;
+
+    ComPtr<IMMDevice> device;
+    result = enumerator->GetDevice(endpointId.c_str(), device.put());
+    if (FAILED(result)) return result;
+    return device->OpenPropertyStore(mode, store->put());
+}
+
+HRESULT ReadEndpointFxValue(const std::wstring& endpointId, std::wstring* value) {
+    if (value == nullptr) return E_POINTER;
+    ComPtr<IPropertyStore> store;
+    HRESULT result = OpenEndpointPropertyStore(endpointId, STGM_READ, &store);
+    if (FAILED(result)) return result;
+
+    PROPVARIANT property;
+    PropVariantInit(&property);
+    result = store->GetValue(PKEY_FX_EndpointEffectClsid, &property);
+    if (SUCCEEDED(result)) {
+        if (property.vt == VT_LPWSTR && property.pwszVal != nullptr) {
+            *value = property.pwszVal;
+        } else if (property.vt == VT_BSTR && property.bstrVal != nullptr) {
+            *value = property.bstrVal;
+        } else {
+            result = S_FALSE;
+        }
+    }
+    PropVariantClear(&property);
+    return result;
+}
+
+HRESULT WriteEndpointFxValue(const std::wstring& endpointId, const std::wstring& value) {
+    ComPtr<IPropertyStore> store;
+    HRESULT result = OpenEndpointPropertyStore(endpointId, STGM_READWRITE, &store);
+    if (FAILED(result)) return result;
+
+    PROPVARIANT property;
+    PropVariantInit(&property);
+    result = InitPropVariantFromString(value.c_str(), &property);
+    if (SUCCEEDED(result)) result = store->SetValue(PKEY_FX_EndpointEffectClsid, property);
+    if (SUCCEEDED(result)) result = store->Commit();
+    PropVariantClear(&property);
+    return result;
+}
+
+HRESULT ClearEndpointFxValue(const std::wstring& endpointId) {
+    ComPtr<IPropertyStore> store;
+    HRESULT result = OpenEndpointPropertyStore(endpointId, STGM_READWRITE, &store);
+    if (FAILED(result)) return result;
+
+    PROPVARIANT empty;
+    PropVariantInit(&empty);
+    result = store->SetValue(PKEY_FX_EndpointEffectClsid, empty);
+    if (SUCCEEDED(result)) result = store->Commit();
+    PropVariantClear(&empty);
+    return result;
+}
+
+std::wstring RegistryIdFromEndpointId(const std::wstring& endpointId) {
+    const size_t brace = endpointId.find_last_of(L'{');
+    return brace == std::wstring::npos ? L"" : endpointId.substr(brace);
 }
 
 bool ReadStringValue(HKEY root, const std::wstring& path, const wchar_t* valueName, std::wstring* value) {
@@ -200,8 +263,8 @@ bool ReadDwordValue(HKEY root, const std::wstring& path, const wchar_t* valueNam
     return RegGetValueW(root, path.c_str(), valueName, RRF_RT_REG_DWORD, nullptr, value, &bytes) == ERROR_SUCCESS;
 }
 
-bool WriteDwordValue(HKEY root, const std::wstring& path, const wchar_t* valueName, DWORD value) {
-    return RegSetKeyValueW(root, path.c_str(), valueName, REG_DWORD, &value, sizeof(value)) == ERROR_SUCCESS;
+LSTATUS WriteDwordValue(HKEY root, const std::wstring& path, const wchar_t* valueName, DWORD value) {
+    return RegSetKeyValueW(root, path.c_str(), valueName, REG_DWORD, &value, sizeof(value));
 }
 
 bool DeleteApoSettingsKey() {
@@ -211,7 +274,7 @@ bool DeleteApoSettingsKey() {
 
 bool SaveBackup(const TargetEndpoint& target, const std::wstring& previousValue, bool previousExists) {
     if (!WriteStringValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
-                          kMicAudioApoInstalledEndpoint, target.registryId)) {
+                          kMicAudioApoInstalledEndpoint, target.id)) {
         return false;
     }
     if (previousExists) {
@@ -223,14 +286,16 @@ bool SaveBackup(const TargetEndpoint& target, const std::wstring& previousValue,
         DeleteValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath, kMicAudioApoPreviousValue);
     }
     return WriteDwordValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
-                           kMicAudioApoPreviousExists, previousExists ? 1u : 0u);
+                           kMicAudioApoPreviousExists, previousExists ? 1u : 0u) == ERROR_SUCCESS;
 }
 
 bool ReadBackup(TargetEndpoint* target, std::wstring* previousValue, bool* previousExists) {
     if (!ReadStringValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
-                         kMicAudioApoInstalledEndpoint, &target->registryId)) {
+                         kMicAudioApoInstalledEndpoint, &target->id)) {
         return false;
     }
+    target->registryId = RegistryIdFromEndpointId(target->id);
+    if (target->registryId.empty()) return false;
     DWORD exists = 0;
     ReadDwordValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
                    kMicAudioApoPreviousExists, &exists);
@@ -282,11 +347,10 @@ void RestoreEndpointProperty() {
     bool previousExists = false;
     if (!ReadBackup(&backup, &previousValue, &previousExists)) return;
 
-    const std::wstring path = FxRegistryPath(backup.registryId);
     if (previousExists) {
-        WriteStringValue(HKEY_LOCAL_MACHINE, path, kMicAudioApoFxProperty, previousValue);
+        WriteEndpointFxValue(backup.id, previousValue);
     } else {
-        DeleteValue(HKEY_LOCAL_MACHINE, path, kMicAudioApoFxProperty);
+        ClearEndpointFxValue(backup.id);
     }
 }
 
@@ -301,16 +365,18 @@ bool InstallApo(UINT highPassHz, UINT gateThresholdCent, std::wstring* error) {
         return false;
     }
 
-    const std::wstring fxPath = FxRegistryPath(target.registryId);
-    std::wstring previousValue;
-    const bool previousExists = ReadStringValue(HKEY_LOCAL_MACHINE, fxPath,
-                                                kMicAudioApoFxProperty, &previousValue) &&
-                                previousValue != kCurrentApoClsid;
-    if (!ReadStringValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
-                         kMicAudioApoInstalledEndpoint, &previousValue) || previousExists) {
+    std::wstring installedEndpointId;
+    const bool installedOnTarget = ReadStringValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
+                                                   kMicAudioApoInstalledEndpoint, &installedEndpointId) &&
+                                   installedEndpointId == target.id;
+    if (!installedOnTarget) {
         std::wstring currentValue;
-        const bool hasCurrentValue = ReadStringValue(HKEY_LOCAL_MACHINE, fxPath,
-                                                     kMicAudioApoFxProperty, &currentValue);
+        const HRESULT readResult = ReadEndpointFxValue(target.id, &currentValue);
+        if (FAILED(readResult)) {
+            *error = L"Could not read the USB microphone audio-effect property: " + ErrorText(readResult);
+            return false;
+        }
+        const bool hasCurrentValue = readResult == S_OK && currentValue != kCurrentApoClsid;
         if (!SaveBackup(target, hasCurrentValue && currentValue != kCurrentApoClsid ? currentValue : L"",
                         hasCurrentValue && currentValue != kCurrentApoClsid)) {
             *error = L"Could not save the endpoint's existing audio effect setting.";
@@ -330,15 +396,24 @@ bool InstallApo(UINT highPassHz, UINT gateThresholdCent, std::wstring* error) {
         return false;
     }
 
-    if (!WriteStringValue(HKEY_LOCAL_MACHINE, fxPath, kMicAudioApoFxProperty, kCurrentApoClsid) ||
-        !WriteDwordValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath, kMicAudioApoHighPassHz,
-                         std::clamp(highPassHz, 40u, 300u)) ||
-        !WriteDwordValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath, kMicAudioApoGateThresholdCent,
-                         std::clamp(gateThresholdCent, 120u, 600u))) {
+    const HRESULT endpointResult = WriteEndpointFxValue(target.id, kCurrentApoClsid);
+    const LSTATUS highPassResult = WriteDwordValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
+                                                   kMicAudioApoHighPassHz,
+                                                   std::clamp(highPassHz, 40u, 300u));
+    const LSTATUS gateResult = WriteDwordValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
+                                               kMicAudioApoGateThresholdCent,
+                                               std::clamp(gateThresholdCent, 120u, 600u));
+    if (FAILED(endpointResult) || highPassResult != ERROR_SUCCESS || gateResult != ERROR_SUCCESS) {
         RestoreEndpointProperty();
         UnregisterApoFromAudioEngine();
         CallDllRegistration("DllUnregisterServer");
-        *error = L"Could not write the endpoint cleaner settings.";
+        if (FAILED(endpointResult)) {
+            *error = L"Could not write the USB microphone audio-effect property: " + ErrorText(endpointResult);
+        } else if (highPassResult != ERROR_SUCCESS) {
+            *error = L"Could not save the high-pass setting: " + ErrorText(HRESULT_FROM_WIN32(highPassResult));
+        } else {
+            *error = L"Could not save the gate setting: " + ErrorText(HRESULT_FROM_WIN32(gateResult));
+        }
         return false;
     }
 
@@ -363,13 +438,11 @@ bool UninstallApo(std::wstring* error) {
 
 bool IsInstalled() {
     TargetEndpoint target;
-    std::wstring installedEndpoint;
+    std::wstring installedEndpointId;
     if (ReadStringValue(HKEY_LOCAL_MACHINE, kMicAudioApoRegistryPath,
-                        kMicAudioApoInstalledEndpoint, &installedEndpoint) &&
-        (!FindTargetEndpoint(&target) || target.registryId == installedEndpoint)) {
+                        kMicAudioApoInstalledEndpoint, &installedEndpointId)) {
         std::wstring current;
-        return ReadStringValue(HKEY_LOCAL_MACHINE, FxRegistryPath(installedEndpoint),
-                               kMicAudioApoFxProperty, &current) && current == kCurrentApoClsid;
+        return ReadEndpointFxValue(installedEndpointId, &current) == S_OK && current == kCurrentApoClsid;
     }
     return false;
 }

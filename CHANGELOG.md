@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.1 - 2026-08-04
+
+- Fixes direct-device installation by using the Windows endpoint property store instead of writing the protected `FxProperties` registry key directly.
+- Stores the full endpoint identifier so uninstall can restore the previous effect on the same endpoint.
+- Reports the exact Windows operation that fails if endpoint installation is still denied.
+
 ## v1.4.0 - 2026-08-04
 
 - Bundles the virtual-cable cleaner and direct-device cleaner into one remapper executable.
