@@ -12,7 +12,7 @@ the mic physically disconnects when its mute button is toggled off, so this watc
 ### modes
 
 - **hold**: device arrival sends key-down, device removal sends key-up.
-- **tap**: each arrival/removal sends one complete key press.
+- **tap**: each arrival/removal sends one complete key press. the default hold time is 75 ms.
 
 ---
 
@@ -21,6 +21,8 @@ the mic physically disconnects when its mute button is toggled off, so this watc
 run the exe. a config window opens on first launch. pick a mode, click the shortcut field, press a key combo (e.g. `CTRL+ALT+F13`), and save.
 
 use **enable delay (ms)** to wait for Windows and other applications to finish switching to the microphone before the shortcut is sent. the default is 500 ms; set it to `0` to send immediately. values from 0 to 5000 ms are accepted.
+
+use **tap duration (ms)** to control how long Tap mode holds the shortcut before releasing it. the default is 75 ms. values from 10 to 1000 ms are accepted; increase it if an application misses very short key presses.
 
 config is stored at `%APPDATA%\MicHotkeyRemapper\config.ini`. enable `Start with Windows` to run at logon. no admin privileges required.
 
