@@ -20,6 +20,8 @@ the mic physically disconnects when its mute button is toggled off, so this watc
 
 run the exe. a config window opens on first launch. pick a mode, click the shortcut field, press a key combo (e.g. `CTRL+ALT+F13`), and save.
 
+use **enable delay (ms)** to wait for Windows and other applications to finish switching to the microphone before the shortcut is sent. the default is 500 ms; set it to `0` to send immediately. values from 0 to 5000 ms are accepted.
+
 config is stored at `%APPDATA%\MicHotkeyRemapper\config.ini`. enable `Start with Windows` to run at logon. no admin privileges required.
 
 when running, the app places a microphone icon in the notification area. green means remapping is enabled; red means it is disabled. right-click the icon to enable or disable remapping, open configuration, or exit. disabling remapping is session-only and releases a held shortcut immediately.

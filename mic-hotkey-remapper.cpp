@@ -31,6 +31,9 @@ constexpr UINT kTrayMessage = WM_APP + 2;
 constexpr UINT kTrayToggle = 2001;
 constexpr UINT kTrayConfigure = 2002;
 constexpr UINT kTrayExit = 2003;
+constexpr UINT_PTR kEnableTimerId = 1;
+constexpr UINT kDefaultEnableDelayMs = 500;
+constexpr UINT kMaxEnableDelayMs = 5000;
 
 UINT g_taskbarCreated = 0;
 
@@ -45,6 +48,7 @@ struct KeyCombo {
 struct Config {
     Mode mode = Mode::Tap;
     KeyCombo combo;
+    UINT enableDelayMs = kDefaultEnableDelayMs;
 };
 
 struct AppState {
@@ -52,6 +56,7 @@ struct AppState {
     bool devicePresent = false;
     bool initialized = false;
     bool keyHeld = false;
+    bool enablePending = false;
     bool remappingEnabled = true;
     ULONGLONG lastTransition = 0;
     HWND window = nullptr;
@@ -66,6 +71,7 @@ struct ConfigUi {
     HWND holdRadio = nullptr;
     HWND tapRadio = nullptr;
     HWND comboEdit = nullptr;
+    HWND delayEdit = nullptr;
     HWND startCheck = nullptr;
     WNDPROC originalEditProc = nullptr;
 };
@@ -218,6 +224,22 @@ bool ParseCombo(const std::wstring& text, KeyCombo* combo) {
     return true;
 }
 
+bool ParseEnableDelay(const std::wstring& text, UINT* delayMs) {
+    std::wstring value = Trim(text);
+    if (value.empty()) return false;
+
+    UINT parsed = 0;
+    for (wchar_t character : value) {
+        if (character < L'0' || character > L'9') return false;
+        UINT digit = static_cast<UINT>(character - L'0');
+        if (parsed > (kMaxEnableDelayMs - digit) / 10) return false;
+        parsed = parsed * 10 + digit;
+    }
+
+    *delayMs = parsed;
+    return true;
+}
+
 std::wstring ConfigDirectory() {
     wchar_t appData[MAX_PATH] = {};
     DWORD length = GetEnvironmentVariableW(L"APPDATA", appData, ARRAYSIZE(appData));
@@ -257,6 +279,9 @@ bool LoadConfig(Config* config) {
         } else if (name == L"key") {
             KeyCombo parsed;
             if (ParseCombo(value, &parsed)) config->combo = parsed;
+        } else if (name == L"enable_delay_ms") {
+            UINT delayMs = 0;
+            if (ParseEnableDelay(value, &delayMs)) config->enableDelayMs = delayMs;
         }
     }
     return true;
@@ -268,6 +293,7 @@ bool SaveConfig(const Config& config) {
     if (!output) return false;
     output << L"mode=" << (config.mode == Mode::Hold ? L"hold" : L"tap") << L"\n";
     output << L"key=" << config.combo.text << L"\n";
+    output << L"enable_delay_ms=" << config.enableDelayMs << L"\n";
     return true;
 }
 
@@ -355,6 +381,32 @@ void TapCombo(const KeyCombo& combo) {
     PressCombo(combo);
     Sleep(15);
     ReleaseCombo(combo);
+}
+
+void CancelPendingEnable(AppState* state) {
+    if (state->window != nullptr) KillTimer(state->window, kEnableTimerId);
+    state->enablePending = false;
+}
+
+void FirePendingEnable(AppState* state) {
+    if (!state->enablePending) return;
+    state->enablePending = false;
+
+    if (!state->remappingEnabled || !state->devicePresent) return;
+    if (state->config.mode == Mode::Hold) {
+        PressCombo(state->config.combo);
+        state->keyHeld = true;
+    } else {
+        TapCombo(state->config.combo);
+    }
+}
+
+void ScheduleEnable(AppState* state) {
+    CancelPendingEnable(state);
+    state->enablePending = true;
+    if (state->config.enableDelayMs == 0 || SetTimer(state->window, kEnableTimerId, state->config.enableDelayMs, nullptr) == 0) {
+        FirePendingEnable(state);
+    }
 }
 
 void DrawMicrophoneShape(HDC dc, int size, COLORREF color) {
@@ -460,14 +512,14 @@ void RemoveTrayIcon(AppState* state) {
 
 void SetRemappingEnabled(AppState* state, bool enabled) {
     if (state->remappingEnabled == enabled) return;
+    CancelPendingEnable(state);
     if (!enabled && state->keyHeld) {
         ReleaseCombo(state->config.combo);
         state->keyHeld = false;
     }
     state->remappingEnabled = enabled;
     if (enabled && state->devicePresent && state->config.mode == Mode::Hold) {
-        PressCombo(state->config.combo);
-        state->keyHeld = true;
+        ScheduleEnable(state);
     }
     UpdateTrayIcon(state);
 }
@@ -497,6 +549,7 @@ void ApplyPresence(AppState* state, bool present, bool initial) {
         ReleaseCombo(state->config.combo);
         state->keyHeld = false;
     }
+    CancelPendingEnable(state);
 
     state->devicePresent = present;
     state->initialized = true;
@@ -506,29 +559,30 @@ void ApplyPresence(AppState* state, bool present, bool initial) {
 
     if (state->config.mode == Mode::Hold) {
         if (present) {
-            PressCombo(state->config.combo);
-            state->keyHeld = true;
+            ScheduleEnable(state);
         }
     } else if (!initial) {
-        TapCombo(state->config.combo);
+        if (present) ScheduleEnable(state);
+        else TapCombo(state->config.combo);
     }
 }
 
 void ReloadConfig(AppState* state) {
     Config updated = state->config;
     if (!LoadConfig(&updated)) return;
+    CancelPendingEnable(state);
     if (state->keyHeld) {
         ReleaseCombo(state->config.combo);
         state->keyHeld = false;
     }
     state->config = updated;
     if (state->remappingEnabled && state->devicePresent && state->config.mode == Mode::Hold) {
-        PressCombo(state->config.combo);
-        state->keyHeld = true;
+        ScheduleEnable(state);
     }
 }
 
 void ReleaseHeldKey(AppState* state) {
+    CancelPendingEnable(state);
     if (state->keyHeld) {
         ReleaseCombo(state->config.combo);
         state->keyHeld = false;
@@ -553,6 +607,11 @@ LRESULT CALLBACK BackgroundWindowProc(HWND window, UINT message, WPARAM wParam, 
         }
         if (message == kReloadMessage) {
             ReloadConfig(state);
+            return 0;
+        }
+        if (message == WM_TIMER && wParam == kEnableTimerId) {
+            KillTimer(window, kEnableTimerId);
+            FirePendingEnable(state);
             return 0;
         }
         if (message == kTrayMessage) {
@@ -728,6 +787,7 @@ enum ControlId {
     kStartCheck = 1004,
     kSaveButton = 1005,
     kCancelButton = 1006,
+    kDelayEdit = 1007,
 };
 
 LRESULT CALLBACK ConfigWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -750,17 +810,24 @@ LRESULT CALLBACK ConfigWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
         HWND keyLabel = CreateWindowW(L"STATIC", L"Shortcut:", WS_CHILD | WS_VISIBLE, 16, 88, 80, 22, window, nullptr, instance, nullptr);
         ui->comboEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", ui->config.combo.text.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 88, 84, 250, 26, window, reinterpret_cast<HMENU>(kComboEdit), instance, nullptr);
         HWND help = CreateWindowW(L"STATIC", L"Click the box, then press the desired key combination.", WS_CHILD | WS_VISIBLE, 88, 115, 340, 22, window, nullptr, instance, nullptr);
-        ui->startCheck = CreateWindowW(L"BUTTON", L"Start with Windows", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP, 16, 150, 220, 28, window, reinterpret_cast<HMENU>(kStartCheck), instance, nullptr);
-        HWND save = CreateWindowW(L"BUTTON", L"Save and apply", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP, 178, 194, 130, 30, window, reinterpret_cast<HMENU>(kSaveButton), instance, nullptr);
-        HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 318, 194, 90, 30, window, reinterpret_cast<HMENU>(kCancelButton), instance, nullptr);
+        HWND delayLabel = CreateWindowW(L"STATIC", L"Enable delay (ms):", WS_CHILD | WS_VISIBLE, 16, 148, 130, 22, window, nullptr, instance, nullptr);
+        std::wstring delayText = std::to_wstring(ui->config.enableDelayMs);
+        ui->delayEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", delayText.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, 150, 144, 100, 26, window, reinterpret_cast<HMENU>(kDelayEdit), instance, nullptr);
+        HWND delayHelp = CreateWindowW(L"STATIC", L"Wait after enable before sending the shortcut. 0 = immediate.", WS_CHILD | WS_VISIBLE, 16, 176, 390, 22, window, nullptr, instance, nullptr);
+        ui->startCheck = CreateWindowW(L"BUTTON", L"Start with Windows", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP, 16, 204, 220, 28, window, reinterpret_cast<HMENU>(kStartCheck), instance, nullptr);
+        HWND save = CreateWindowW(L"BUTTON", L"Save and apply", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP, 178, 248, 130, 30, window, reinterpret_cast<HMENU>(kSaveButton), instance, nullptr);
+        HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 318, 248, 90, 30, window, reinterpret_cast<HMENU>(kCancelButton), instance, nullptr);
         SetControlFont(modeLabel);
         SetControlFont(keyLabel);
         SetControlFont(help);
+        SetControlFont(delayLabel);
+        SetControlFont(delayHelp);
         SetControlFont(save);
         SetControlFont(cancel);
         SetControlFont(ui->holdRadio);
         SetControlFont(ui->tapRadio);
         SetControlFont(ui->comboEdit);
+        SetControlFont(ui->delayEdit);
         SetControlFont(ui->startCheck);
         SendMessageW(ui->holdRadio, BM_SETCHECK, ui->config.mode == Mode::Hold, 0);
         SendMessageW(ui->tapRadio, BM_SETCHECK, ui->config.mode == Mode::Tap, 0);
@@ -780,7 +847,15 @@ LRESULT CALLBACK ConfigWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
                 MessageBoxW(window, L"Enter a shortcut such as CTRL+ALT+F13 or F13.", L"Invalid shortcut", MB_OK | MB_ICONERROR);
                 return 0;
             }
+            wchar_t delayText[32] = {};
+            GetWindowTextW(ui->delayEdit, delayText, ARRAYSIZE(delayText));
+            UINT delayMs = 0;
+            if (!ParseEnableDelay(delayText, &delayMs)) {
+                MessageBoxW(window, L"Enter an enable delay from 0 to 5000 milliseconds.", L"Invalid delay", MB_OK | MB_ICONERROR);
+                return 0;
+            }
             ui->config.combo = parsed;
+            ui->config.enableDelayMs = delayMs;
             ui->config.mode = SendMessageW(ui->holdRadio, BM_GETCHECK, 0, 0) == BST_CHECKED ? Mode::Hold : Mode::Tap;
             ui->startWithWindows = SendMessageW(ui->startCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
             if (!SaveConfig(ui->config) || !SetAutostart(ui->startWithWindows)) {
@@ -824,7 +899,7 @@ int RunConfigurator(HINSTANCE instance) {
     ui.startWithWindows = true;
     bool autostartEnabled = GetAutostart(&autostartConfigured);
     if (autostartConfigured) ui.startWithWindows = autostartEnabled;
-    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, kConfigClass, L"Microphone Shortcut", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 440, 275, nullptr, nullptr, instance, &ui);
+    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, kConfigClass, L"Microphone Shortcut", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 440, 320, nullptr, nullptr, instance, &ui);
     if (window == nullptr) return 1;
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
